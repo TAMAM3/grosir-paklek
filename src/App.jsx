@@ -64,6 +64,24 @@ function App() {
 
   const [orderNumber, setOrderNumber] = useState("");
   const [submittingOrder, setSubmittingOrder] = useState(false);
+  const [orderCopied, setOrderCopied] = useState(false);
+
+  const copyOrderNumber = async () => {
+    try {
+      await navigator.clipboard.writeText(orderNumber);
+    } catch {
+      // Fallback untuk browser yang menolak clipboard API
+      const input = document.createElement("textarea");
+      input.value = orderNumber;
+      document.body.appendChild(input);
+      input.select();
+      document.execCommand("copy");
+      document.body.removeChild(input);
+    }
+
+    setOrderCopied(true);
+    setTimeout(() => setOrderCopied(false), 2000);
+  };
 
   // ==============================
   // CEK PESANAN
@@ -1120,6 +1138,18 @@ function App() {
               <strong>
                 {orderNumber}
               </strong>
+
+              <button
+                type="button"
+                className={`copy-order-btn${
+                  orderCopied ? " copied" : ""
+                }`}
+                onClick={copyOrderNumber}
+              >
+                {orderCopied
+                  ? "✓ Tersalin"
+                  : "📋 Salin Nomor Pesanan"}
+              </button>
             </div>
 
             <div className="success-info">
@@ -1144,9 +1174,12 @@ function App() {
               </div>
             </div>
 
-            <p className="success-note">
-              Simpan nomor pesanan kamu untuk
-              mengecek status pesanan nanti.
+            <p className="success-note order-remember-alert">
+              ⚠️ <strong>Ingat nomor pesanan kamu!</strong>{" "}
+              Simpan atau salin nomor di atas untuk
+              melacak pesanan nanti lewat menu Cek
+              Pesanan, bersama nomor WhatsApp yang kamu
+              pakai saat memesan.
             </p>
 
             <button

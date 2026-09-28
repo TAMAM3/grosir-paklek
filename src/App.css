@@ -2863,3 +2863,43 @@ body {
 .cart-modal {
   max-width: var(--app-width);
 }
+
+/* ==============================
+   INGAT NOMOR PESANAN + SALIN
+============================== */
+
+.order-number .copy-order-btn {
+  display: inline-block;
+
+  margin: 12px 0 0;
+  padding: 9px 16px;
+
+  color: #14532d;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0;
+
+  background: #fff;
+  border: 1px solid #b7dcc3;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.order-number .copy-order-btn.copied {
+  color: #fff;
+  background: #22a45d;
+  border-color: #22a45d;
+}
+
+.success-note.order-remember-alert {
+  padding: 12px 14px;
+
+  color: #7a5200;
+  font-size: 13px;
+  line-height: 1.55;
+  text-align: left;
+
+  background: #fff7e0;
+  border: 1px solid #f5d98a;
+  border-radius: 12px;
+}
