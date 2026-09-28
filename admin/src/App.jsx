@@ -1,10 +1,13 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import "./App.css";
 
 const API_URL =
   "https://script.google.com/macros/s/AKfycbyMAvQylcZxBQrlkbRS28vasPb-ytZFzR5z5jhHK-FgTm3_jezS697rFx9-FVPxWjwa/exec";
 
-const CUSTOMER_URL = "http://localhost:5173";
+const CUSTOMER_URL = "https://grosir-paklek.vercel.app/";
+
+// Harus SAMA dengan PRINT_KEY di file Struk.gs (Apps Script)
+const PRINT_KEY = "GROSIR";
 
 const formatRupiah = (number) => {
   return new Intl.NumberFormat("id-ID", {
@@ -17,9 +20,10 @@ const formatRupiah = (number) => {
 const formatDate = (dateString) => {
   if (!dateString) return "-";
 
-  const date = new Date(dateString);
+  // Bisa membaca tanggal ISO maupun teks dari Sheet (dd/MM/yyyy atau M/d/yyyy)
+  const date = parseOrderDate(dateString);
 
-  if (isNaN(date.getTime())) {
+  if (!date) {
     return dateString;
   }
 
@@ -32,12 +36,149 @@ const formatDate = (dateString) => {
   });
 };
 
+// Membaca tanggal dari Sheet: bisa ISO, "27/09/2026 15:37:57", atau "9/27/2026 14:15:06"
+const parseOrderDate = (value) => {
+  if (!value) return null;
+
+  if (value instanceof Date) {
+    return isNaN(value.getTime()) ? null : value;
+  }
+
+  const str = String(value).trim();
+
+  if (/^\d{4}-\d{2}-\d{2}/.test(str)) {
+    const d = new Date(str);
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  const m = str.match(
+    /^(\d{1,2})[\/.-](\d{1,2})[\/.-](\d{4})(?:[,\s]+(\d{1,2})[:.](\d{2})(?:[:.](\d{2}))?)?/
+  );
+
+  if (m) {
+    const a = Number(m[1]);
+    const b = Number(m[2]);
+    const year = Number(m[3]);
+
+    // default format Indonesia (tgl/bln); kalau bagian kedua > 12 berarti bln/tgl
+    let day = a;
+    let month = b;
+
+    if (a <= 12 && b > 12) {
+      month = a;
+      day = b;
+    }
+
+    return new Date(
+      year,
+      month - 1,
+      day,
+      Number(m[4] || 0),
+      Number(m[5] || 0),
+      Number(m[6] || 0)
+    );
+  }
+
+  const d = new Date(str);
+  return isNaN(d.getTime()) ? null : d;
+};
+
+const pad2 = (n) => String(n).padStart(2, "0");
+
+const todayDay = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+};
+
+const todayMonth = () => todayDay().slice(0, 7);
+
+const todayYear = () => String(new Date().getFullYear());
+
+const matchesDateFilter = (order, filter) => {
+  if (filter.mode === "all") return true;
+
+  const d = parseOrderDate(order.date);
+  if (!d) return false;
+
+  const y = d.getFullYear();
+  const mo = pad2(d.getMonth() + 1);
+  const da = pad2(d.getDate());
+
+  if (filter.mode === "day") return `${y}-${mo}-${da}` === filter.day;
+  if (filter.mode === "month") return `${y}-${mo}` === filter.month;
+  if (filter.mode === "year") return String(y) === String(filter.year);
+
+  return true;
+};
+
+const filterLabelText = (filter) => {
+  if (filter.mode === "day") {
+    return new Date(filter.day + "T00:00:00").toLocaleDateString("id-ID", {
+      day: "numeric",
+      month: "long",
+      year: "numeric",
+    });
+  }
+
+  if (filter.mode === "month") {
+    return new Date(filter.month + "-01T00:00:00").toLocaleDateString(
+      "id-ID",
+      { month: "long", year: "numeric" }
+    );
+  }
+
+  if (filter.mode === "year") return `Tahun ${filter.year}`;
+
+  return "Semua waktu";
+};
+
 const statusClass = (status) => {
   if (status === "Selesai") return "status-selesai";
   if (status === "Diproses") return "status-diproses";
   if (status === "Sedang Diantar") return "status-diantar";
   return "status-menunggu";
 };
+
+// Angka yang menghitung naik dari 0 saat tampil
+function AnimatedNumber({ value, format }) {
+  const target = Number(value) || 0;
+  const [shown, setShown] = useState(0);
+
+  useEffect(() => {
+    const reduce =
+      window.matchMedia &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    if (reduce) {
+      setShown(target);
+      return;
+    }
+
+    let frame;
+    const start = performance.now();
+    const duration = 900;
+
+    const tick = (now) => {
+      const progress = Math.min((now - start) / duration, 1);
+      const eased = 1 - Math.pow(1 - progress, 3);
+
+      setShown(target * eased);
+
+      if (progress < 1) frame = requestAnimationFrame(tick);
+    };
+
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, [target]);
+
+  const rounded = Math.round(shown);
+
+  return (
+    <span className="count-up">
+      {format ? format(rounded) : rounded}
+    </span>
+  );
+}
 
 function App() {
   const [page, setPage] = useState("dashboard");
@@ -77,6 +218,41 @@ const [processingImage, setProcessingImage] = useState(false);
 const [updatingOrder, setUpdatingOrder] = useState(false);
 
 const [notificationCount, setNotificationCount] = useState(0);
+
+const [toast, setToast] = useState(null);
+const toastTimer = useRef(null);
+const [closingOrder, setClosingOrder] = useState(false);
+
+// Filter tanggal untuk Dashboard, Pesanan, dan Laporan
+const [dateFilter, setDateFilter] = useState({
+  mode: "all",
+  day: todayDay(),
+  month: todayMonth(),
+  year: todayYear(),
+});
+
+// Notifikasi kecil pengganti notify()
+const notify = (message) => {
+  const type = /berhasil|diaktifkan|dinonaktifkan/i.test(message)
+    ? "success"
+    : "error";
+
+  if (toastTimer.current) clearTimeout(toastTimer.current);
+
+  setToast({ id: Date.now(), message, type });
+
+  toastTimer.current = setTimeout(() => setToast(null), 3500);
+};
+
+// Tutup jendela detail dengan animasi
+const closeOrderModal = () => {
+  setClosingOrder(true);
+
+  setTimeout(() => {
+    setSelectedOrder(null);
+    setClosingOrder(false);
+  }, 220);
+};
 const [previousNotificationCount, setPreviousNotificationCount] =
   useState(null);
 
@@ -198,7 +374,7 @@ updateNotifications(data.orders || []);
       setOrderDetails(data.details || []);
     } catch (err) {
       console.error(err);
-      alert("Gagal mengambil detail pesanan.");
+      notify("Gagal mengambil detail pesanan.");
     } finally {
       setPageLoading(false);
     }
@@ -284,12 +460,12 @@ const handleProductImageChange = (e) => {
   if (!file) return;
 
   if (!file.type.startsWith("image/")) {
-    alert("File yang dipilih harus berupa gambar.");
+    notify("File yang dipilih harus berupa gambar.");
     return;
   }
 
   if (file.size > 10 * 1024 * 1024) {
-    alert("Ukuran foto maksimal 10 MB.");
+    notify("Ukuran foto maksimal 10 MB.");
     return;
   }
 
@@ -390,7 +566,7 @@ const saveProduct = async (e) => {
     !productForm.name ||
     !productForm.category
   ) {
-    alert("ID, nama produk, dan kategori wajib diisi.");
+    notify("ID, nama produk, dan kategori wajib diisi.");
     return;
   }
 
@@ -438,7 +614,7 @@ const saveProduct = async (e) => {
 
     await postAdminAction(payload);
 
-    alert(
+    notify(
       editingProduct
         ? "Produk berhasil diperbarui."
         : "Produk berhasil ditambahkan."
@@ -457,7 +633,7 @@ const saveProduct = async (e) => {
 
     setProcessingImage(false);
 
-    alert(
+    notify(
       err.message ||
       "Gagal menyimpan produk."
     );
@@ -485,7 +661,7 @@ const toggleProductStatus = async (product) => {
       active: newStatus,
     });
 
-    alert(
+    notify(
       newStatus === "Ya"
         ? "Produk berhasil diaktifkan."
         : "Produk berhasil dinonaktifkan."
@@ -495,7 +671,7 @@ const toggleProductStatus = async (product) => {
 
   } catch (err) {
     console.error(err);
-    alert(err.message || "Gagal mengubah status produk.");
+    notify(err.message || "Gagal mengubah status produk.");
   }
 };
 
@@ -529,11 +705,11 @@ const updateSelectedOrderStatus = async (status) => {
 
     await fetchDashboard();
 
-    alert("Status pesanan berhasil diperbarui.");
+    notify("Status pesanan berhasil diperbarui.");
 
   } catch (err) {
     console.error(err);
-    alert(err.message || "Gagal memperbarui status.");
+    notify(err.message || "Gagal memperbarui status.");
   } finally {
     setUpdatingOrder(false);
   }
@@ -635,7 +811,148 @@ useEffect(() => {
   // FILTER PESANAN
   // =========================================================
 
-  const filteredOrders = orders.filter((order) => {
+  const dateFilteredOrders = orders.filter((order) =>
+    matchesDateFilter(order, dateFilter)
+  );
+
+  const orderStats = {
+    total: dateFilteredOrders.length,
+    waiting: dateFilteredOrders.filter(
+      (o) => o.status === "Menunggu Konfirmasi"
+    ).length,
+    processing: dateFilteredOrders.filter(
+      (o) => o.status === "Diproses"
+    ).length,
+    delivering: dateFilteredOrders.filter(
+      (o) => o.status === "Sedang Diantar"
+    ).length,
+    completed: dateFilteredOrders.filter(
+      (o) => o.status === "Selesai"
+    ).length,
+    totalOmzet: dateFilteredOrders.reduce(
+      (sum, o) => sum + Number(o.total || 0),
+      0
+    ),
+    omzetSelesai: dateFilteredOrders
+      .filter((o) => o.status === "Selesai")
+      .reduce((sum, o) => sum + Number(o.total || 0), 0),
+  };
+
+  const recentOrders = dateFilteredOrders.slice(0, 5);
+
+  const changeFilterMode = (mode) =>
+    setDateFilter((prev) => ({ ...prev, mode }));
+
+  const setQuickFilter = (mode) =>
+    setDateFilter({
+      mode,
+      day: todayDay(),
+      month: todayMonth(),
+      year: todayYear(),
+    });
+
+  // Pilihan mode + input tanggal (sejajar dengan tombol Refresh)
+  const renderDateFilter = () => (
+    <div className="date-filter">
+      <div className="filter-modes">
+        {[
+          ["all", "Semua"],
+          ["day", "Harian"],
+          ["month", "Bulanan"],
+          ["year", "Tahunan"],
+        ].map(([mode, label]) => (
+          <button
+            key={mode}
+            type="button"
+            className={`filter-mode${
+              dateFilter.mode === mode ? " active" : ""
+            }`}
+            onClick={() => changeFilterMode(mode)}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {dateFilter.mode === "day" && (
+        <input
+          type="date"
+          className="filter-input"
+          value={dateFilter.day}
+          onChange={(e) =>
+            setDateFilter((prev) => ({
+              ...prev,
+              day: e.target.value || todayDay(),
+            }))
+          }
+        />
+      )}
+
+      {dateFilter.mode === "month" && (
+        <input
+          type="month"
+          className="filter-input"
+          value={dateFilter.month}
+          onChange={(e) =>
+            setDateFilter((prev) => ({
+              ...prev,
+              month: e.target.value || todayMonth(),
+            }))
+          }
+        />
+      )}
+
+      {dateFilter.mode === "year" && (
+        <input
+          type="number"
+          min="2020"
+          max="2100"
+          className="filter-input filter-year"
+          value={dateFilter.year}
+          onChange={(e) =>
+            setDateFilter((prev) => ({
+              ...prev,
+              year: e.target.value || todayYear(),
+            }))
+          }
+        />
+      )}
+    </div>
+  );
+
+  // Penanda periode aktif + pilihan cepat + reset
+  const renderFilterSummary = () => (
+    <div className="filter-summary">
+      <div className="filter-summary-text">
+        📅 Menampilkan: <strong>{filterLabelText(dateFilter)}</strong>
+        <span>· {dateFilteredOrders.length} pesanan</span>
+      </div>
+
+      <div className="filter-quick">
+        <button type="button" onClick={() => setQuickFilter("day")}>
+          Hari Ini
+        </button>
+        <button type="button" onClick={() => setQuickFilter("month")}>
+          Bulan Ini
+        </button>
+        <button type="button" onClick={() => setQuickFilter("year")}>
+          Tahun Ini
+        </button>
+
+        {dateFilter.mode !== "all" && (
+          <button
+            type="button"
+            className="filter-reset"
+            onClick={() => changeFilterMode("all")}
+          >
+            ✕ Reset
+          </button>
+        )}
+      </div>
+    </div>
+  );
+
+  const filteredOrders = dateFilteredOrders.filter((order) => {
     const keyword = searchOrder.toLowerCase();
 
     return (
@@ -732,7 +1049,11 @@ useEffect(() => {
   >
     🔄 Refresh
   </button>
+
+  {renderDateFilter()}
 </div>
+
+        {renderFilterSummary()}
 
         {error && <div className="error-box">{error}</div>}
 
@@ -741,7 +1062,7 @@ useEffect(() => {
             <div className="stat-icon orange">📦</div>
             <div>
               <span>Total Produk</span>
-              <strong>{dashboard.products?.total || 0}</strong>
+              <strong><AnimatedNumber value={dashboard.products?.total || 0} /></strong>
             </div>
           </div>
 
@@ -749,7 +1070,7 @@ useEffect(() => {
             <div className="stat-icon blue">🛍️</div>
             <div>
               <span>Total Pesanan</span>
-              <strong>{dashboard.orders?.total || 0}</strong>
+              <strong><AnimatedNumber value={orderStats.total} /></strong>
             </div>
           </div>
 
@@ -757,7 +1078,7 @@ useEffect(() => {
             <div className="stat-icon red">⚠️</div>
             <div>
               <span>Stok Menipis</span>
-              <strong>{dashboard.products?.lowStock || 0}</strong>
+              <strong><AnimatedNumber value={dashboard.products?.lowStock || 0} /></strong>
             </div>
           </div>
 
@@ -765,7 +1086,7 @@ useEffect(() => {
             <div className="stat-icon green">✅</div>
             <div>
               <span>Pesanan Selesai</span>
-              <strong>{dashboard.orders?.completed || 0}</strong>
+              <strong><AnimatedNumber value={orderStats.completed} /></strong>
             </div>
           </div>
         </div>
@@ -775,7 +1096,12 @@ useEffect(() => {
             <div className="stat-icon purple">💰</div>
             <div>
               <span>Total Omzet</span>
-              <strong>{formatRupiah(dashboard.orders?.totalOmzet)}</strong>
+              <strong>
+                <AnimatedNumber
+                  value={orderStats.totalOmzet}
+                  format={formatRupiah}
+                />
+              </strong>
             </div>
           </div>
 
@@ -784,7 +1110,10 @@ useEffect(() => {
             <div>
               <span>Omzet Selesai</span>
               <strong>
-                {formatRupiah(dashboard.orders?.omzetSelesai)}
+                <AnimatedNumber
+                  value={orderStats.omzetSelesai}
+                  format={formatRupiah}
+                />
               </strong>
             </div>
           </div>
@@ -793,7 +1122,7 @@ useEffect(() => {
             <div className="stat-icon yellow">⏳</div>
             <div>
               <span>Menunggu</span>
-              <strong>{dashboard.orders?.waiting || 0}</strong>
+              <strong><AnimatedNumber value={orderStats.waiting} /></strong>
             </div>
           </div>
 
@@ -801,7 +1130,7 @@ useEffect(() => {
             <div className="stat-icon blue">🚚</div>
             <div>
               <span>Sedang Diantar</span>
-              <strong>{dashboard.orders?.delivering || 0}</strong>
+              <strong><AnimatedNumber value={orderStats.delivering} /></strong>
             </div>
           </div>
         </div>
@@ -822,7 +1151,7 @@ useEffect(() => {
               </button>
             </div>
 
-            {dashboard.pesananTerbaru?.length > 0 ? (
+            {recentOrders.length > 0 ? (
               <div className="table-wrapper">
                 <table>
                   <thead>
@@ -835,8 +1164,7 @@ useEffect(() => {
                   </thead>
 
                   <tbody>
-                    {dashboard.pesananTerbaru
-                      .slice(0, 5)
+                    {recentOrders
                       .map((order) => (
                         <tr key={order.orderId}>
                           <td>
@@ -1146,16 +1474,22 @@ useEffect(() => {
             <p>Semua pesanan pelanggan</p>
           </div>
 
-          <button className="refresh-btn" onClick={refreshData}>
-            🔄 Refresh
-          </button>
+          <div className="title-actions">
+            <button className="refresh-btn" onClick={refreshData}>
+              🔄 Refresh
+            </button>
+
+            {renderDateFilter()}
+          </div>
         </div>
+
+        {renderFilterSummary()}
 
         <div className="panel">
           <div className="panel-header">
             <div>
               <h2>Daftar Pesanan</h2>
-              <p>{orders.length} pesanan ditemukan</p>
+              <p>{filteredOrders.length} pesanan ditemukan</p>
             </div>
 
             <input
@@ -1320,6 +1654,9 @@ useEffect(() => {
   // =========================================================
 
   const renderReports = () => {
+    // Semua angka pesanan di Laporan mengikuti filter tanggal
+    const orders = dateFilteredOrders;
+
     const completedOrders = orders.filter(
       (order) => order.status === "Selesai"
     );
@@ -1354,10 +1691,16 @@ useEffect(() => {
             <p>Ringkasan berdasarkan data Google Sheets</p>
           </div>
 
-          <button className="refresh-btn" onClick={refreshData}>
-            🔄 Refresh
-          </button>
+          <div className="title-actions">
+            <button className="refresh-btn" onClick={refreshData}>
+              🔄 Refresh
+            </button>
+
+            {renderDateFilter()}
+          </div>
         </div>
+
+        {renderFilterSummary()}
 
         <div className="report-grid">
           <div className="report-card">
@@ -1392,7 +1735,7 @@ useEffect(() => {
             <div className="panel-header">
               <div>
                 <h2>📦 Status Pesanan</h2>
-                <p>Distribusi seluruh pesanan</p>
+                <p>Distribusi pesanan pada periode terpilih</p>
               </div>
             </div>
 
@@ -1477,6 +1820,16 @@ useEffect(() => {
 
   return (
     <div className="admin-layout">
+      {toast && (
+        <div
+          key={toast.id}
+          className={`toast toast-${toast.type}`}
+        >
+          {toast.type === "success" ? "✅ " : "⚠️ "}
+          {toast.message}
+        </div>
+      )}
+
       {/* SIDEBAR */}
       <aside className="sidebar">
         <div className="sidebar-logo">
@@ -1556,7 +1909,11 @@ useEffect(() => {
           </div>
         </header>
 
-        <div className="content-container">{renderPage()}</div>
+        <div className="content-container">
+          <div className="page-fade" key={page}>
+            {renderPage()}
+          </div>
+        </div>
       </main>
 
           {showProductForm && (
@@ -1778,8 +2135,8 @@ useEffect(() => {
       {/* DETAIL PESANAN MODAL */}
       {selectedOrder && (
         <div
-          className="modal-overlay"
-          onClick={() => setSelectedOrder(null)}
+          className={`modal-overlay${closingOrder ? " closing" : ""}`}
+          onClick={closeOrderModal}
         >
           <div
             className="order-modal"
@@ -1793,7 +2150,7 @@ useEffect(() => {
 
               <button
                 className="modal-close"
-                onClick={() => setSelectedOrder(null)}
+                onClick={closeOrderModal}
               >
                 ✕
               </button>
@@ -1862,8 +2219,11 @@ useEffect(() => {
             </div>
 
             {pageLoading ? (
-              <div className="modal-loading">
-                Mengambil detail...
+              <div className="skeleton-stack">
+                <div className="skeleton skeleton-line" />
+                <div className="skeleton skeleton-line short" />
+                <div className="skeleton skeleton-card" />
+                <div className="skeleton skeleton-card" />
               </div>
             ) : (
               <div className="detail-list">
@@ -1898,6 +2258,17 @@ useEffect(() => {
 
             <div className="modal-actions">
               <a
+                href={`${API_URL}?action=struk&id=${encodeURIComponent(
+                  selectedOrder.orderId
+                )}&key=${encodeURIComponent(PRINT_KEY)}`}
+                target="_blank"
+                rel="noreferrer"
+                className="print-btn"
+              >
+                🖨 Cetak Struk
+              </a>
+
+              <a
                 href={`https://wa.me/${String(
                   selectedOrder.phone || ""
                 ).replace(/\D/g, "")}`}
@@ -1910,7 +2281,7 @@ useEffect(() => {
 
               <button
                 className="close-btn"
-                onClick={() => setSelectedOrder(null)}
+                onClick={closeOrderModal}
               >
                 Tutup
               </button>
